@@ -1,8 +1,9 @@
 scrollbarStyle = require 'scrollbar-style'
 {Range, Point} = require 'text-buffer'
-{CompositeDisposable} = require 'event-kit'
+{CompositeDisposable, Disposable} = require 'event-kit'
 {ipcRenderer} = require 'electron'
 Grim = require 'grim'
+elementResizeDetector = require('element-resize-detector')({strategy: 'scroll'})
 
 TextEditorPresenter = require './text-editor-presenter'
 GutterContainerComponent = require './gutter-container-component'
@@ -105,10 +106,7 @@ class TextEditorComponent
       @disposables.add @themes.onDidChangeActiveThemes @onAllThemesLoaded
     @disposables.add scrollbarStyle.onDidChangePreferredScrollbarStyle @refreshScrollbars
 
-    @disposables.add @views.pollDocument(@pollDOM)
-
     @updateSync()
-    @checkForVisibilityChange()
     @initialized = true
 
   destroy: ->
@@ -123,6 +121,25 @@ class TextEditorComponent
 
     @onVerticalScroll = null
     @onHorizontalScroll = null
+
+    @intersectionObserver?.disconnect()
+
+  didAttach: ->
+    @intersectionObserver = new IntersectionObserver((entries) =>
+      {intersectionRect} = entries[entries.length - 1]
+      if intersectionRect.width > 0 or intersectionRect.height > 0
+        @becameVisible()
+    )
+    @intersectionObserver.observe(@domNode)
+    @becameVisible() if @isVisible()
+
+    measureDimensions = @measureDimensions.bind(this)
+    elementResizeDetector.listenTo(@domNode, measureDimensions)
+    @disposables.add(new Disposable => elementResizeDetector.removeListener(@domNode, measureDimensions))
+
+    measureWindowSize = @measureWindowSize.bind(this)
+    window.addEventListener('resize', measureWindowSize)
+    @disposables.add(new Disposable -> window.removeEventListener('resize', measureWindowSize))
 
   getDomNode: ->
     @domNode
@@ -185,7 +202,6 @@ class TextEditorComponent
     @linesComponent.updateSync(@presenter.getPreMeasurementState())
 
   readAfterUpdateSync: =>
-    @overlayManager?.measureOverlays()
     @linesComponent.measureBlockDecorations()
     @offScreenBlockDecorationsComponent.measureBlockDecorations()
 
@@ -201,7 +217,6 @@ class TextEditorComponent
     @invalidateMeasurements()
     @measureScrollbars() if @measureScrollbarsWhenShown
     @sampleFontStyling()
-    @sampleBackgroundColors()
     @measureWindowSize()
     @measureDimensions()
     @measureLineHeightAndDefaultCharWidth() if @measureLineHeightAndDefaultCharWidthWhenShown
@@ -622,11 +637,12 @@ class TextEditorComponent
     return unless @performedInitialMeasurement
     return unless @themes.isInitialLoadComplete()
 
-    # This delay prevents the styling from going haywire when stylesheets are
-    # reloaded in dev mode. It seems like a workaround for a browser bug, but
-    # not totally sure.
-
-    unless @stylingChangeAnimationFrameRequested
+    # Handle styling change synchronously if a global editor property such as
+    # font size might have changed. Otherwise coalesce multiple style sheet changes
+    # into a measurement on the next animation frame to prevent excessive thrashing.
+    if styleElement.getAttribute('source-path') is 'global-text-editor-styles'
+      @handleStylingChange()
+    else if not @stylingChangeAnimationFrameRequested
       @stylingChangeAnimationFrameRequested = true
       requestAnimationFrame =>
         @stylingChangeAnimationFrameRequested = false
@@ -639,9 +655,9 @@ class TextEditorComponent
     @handleStylingChange()
 
   handleStylingChange: =>
-    @sampleFontStyling()
-    @sampleBackgroundColors()
-    @invalidateMeasurements()
+    if @isVisible()
+      @sampleFontStyling()
+      @invalidateMeasurements()
 
   handleDragUntilMouseUp: (dragHandler) ->
     dragging = false
@@ -732,24 +748,6 @@ class TextEditorComponent
 
     @domNode? and (@domNode.offsetHeight > 0 or @domNode.offsetWidth > 0)
 
-  pollDOM: =>
-    unless @checkForVisibilityChange()
-      @sampleBackgroundColors()
-      @measureWindowSize()
-      @measureDimensions()
-      @sampleFontStyling()
-      @overlayManager?.measureOverlays()
-
-  checkForVisibilityChange: ->
-    if @isVisible()
-      if @wasVisible
-        false
-      else
-        @becameVisible()
-        @wasVisible = true
-    else
-      @wasVisible = false
-
   # Measure explicitly-styled height and width and relay them to the model. If
   # these values aren't explicitly styled, we assume the editor is unconstrained
   # and use the scrollHeight / scrollWidth as its height and width in
@@ -813,15 +811,6 @@ class TextEditorComponent
       @clearPoolAfterUpdate = true
       @measureLineHeightAndDefaultCharWidth()
       @invalidateMeasurements()
-
-  sampleBackgroundColors: (suppressUpdate) ->
-    {backgroundColor} = getComputedStyle(@hostElement)
-    @presenter.setBackgroundColor(backgroundColor)
-
-    lineNumberGutter = @gutterContainerComponent?.getLineNumberGutterComponent()
-    if lineNumberGutter
-      gutterBackgroundColor = getComputedStyle(lineNumberGutter.getDomNode()).backgroundColor
-      @presenter.setGutterBackgroundColor(gutterBackgroundColor)
 
   measureLineHeightAndDefaultCharWidth: ->
     if @isVisible()

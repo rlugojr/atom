@@ -15,11 +15,11 @@ describe "Babel transpiler support", ->
     CompileCache.setCacheDirectory(temp.mkdirSync('compile-cache'))
     for cacheKey in Object.keys(require.cache)
       if cacheKey.startsWith(path.join(__dirname, 'fixtures', 'babel'))
-        console.log('deleting', cacheKey)
         delete require.cache[cacheKey]
 
   afterEach ->
     CompileCache.setCacheDirectory(originalCacheDir)
+    temp.cleanupSync()
 
   describe 'when a .js file starts with /** @babel */;', ->
     it "transpiles it using babel", ->
@@ -34,6 +34,11 @@ describe "Babel transpiler support", ->
   describe 'when a .js file starts with "use babel";', ->
     it "transpiles it using babel", ->
       transpiled = require('./fixtures/babel/babel-double-quotes.js')
+      expect(transpiled(3)).toBe 4
+
+  describe 'when a .js file starts with /* @flow */', ->
+    it "transpiles it using babel", ->
+      transpiled = require('./fixtures/babel/flow-comment.js')
       expect(transpiled(3)).toBe 4
 
   describe "when a .js file does not start with 'use babel';", ->
